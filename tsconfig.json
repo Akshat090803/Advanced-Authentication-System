@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "paths": {
+      "@/*": ["./src/*"],
+      "@models/*": ["./src/models/*"],
+      "@controllers/*":["./src/controllers/*"],
+      "@middleware/*": ["./src/middlewares/*"],
+      "@routes/*": ["./src/routes/*"],
+      "@config/*": ["./src/config/*"],
+      "@lib/*": ["./src/lib/*"],
+    },
+
+  
+  },
+  "include": ["src/**/*"]
+}
