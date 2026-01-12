@@ -20,3 +20,19 @@ export const registerSchema = z.object({
       "Password must contain at least one special character"
     ),
 });
+
+
+
+export const loginSchema = z.object({
+  email: z.email("Invalid email format").trim().min(1, "Email is required").toLowerCase(),
+  password: z
+    .string()
+    .min(1, { message: "Password is required" })
+    .min(8, "Password must be at least 8 characters")
+    
+})
+
+
+export const emailSchema = z.object({
+    email: z.email("Invalid email format").trim().min(1, "Email is required").toLowerCase()
+})

@@ -12,7 +12,8 @@ export const errorHandler = (
   let status = "error";
   let message = "Internal Server Error";
   let errors: Record<string, unknown[] | undefined> | null = null;
-
+  
+  console.log("Error",err)
    if (err instanceof ApiError) {
     statusCode = err.statusCode;
     status = err.status;

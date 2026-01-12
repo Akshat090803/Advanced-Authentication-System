@@ -1,8 +1,9 @@
 import dotenv from "dotenv";
+dotenv.config();
 import app from "./app.js";
 import dbConnect from "./config/db-connect.js";
 
-dotenv.config();
+
 
 async function startServer() {
   await dbConnect();
