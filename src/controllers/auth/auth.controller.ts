@@ -19,6 +19,21 @@ import {
   verifyRefreshToken,
 } from "@/utils/tokens.js";
 import crypto, { randomUUID } from "crypto";
+import { OAuth2Client } from "google-auth-library";
+
+function getGoogleClient(){
+  const clientSecret=process.env.GOOGLE_CLIENT_SECRET;
+  const clientID=process.env.GOOGLE_CLIENT_ID;
+  const redirectUrl=process.env.GOOGLE_REDIRECT_URI;
+
+  if(!clientSecret || !clientID){
+    throw new ApiError(500,"Internal Server Error","error",{
+       errors:["Client Secret or ID is missing"]
+    })
+  }
+  
+  return new OAuth2Client(clientID,clientSecret,redirectUrl)
+}
 
 export const registerHandler = async (
   req: Request,
@@ -583,6 +598,143 @@ export const resetPasswordHandler = async (
   }
 };
 
+
+// STEP 1: Redirect to Google Auth Page
+//genrate googleRedirect uri
+//flow frontend->backend->google 
+//than google->backend->frontend
+export const googleAuthRedirectHandler=async(_req:Request,res:Response,next:NextFunction)=>{
+  try {
+    const client = getGoogleClient();
+
+    const url = client.generateAuthUrl({
+      access_type:"offline",
+      prompt:'consent',
+      scope:['openid','email','profile']
+    })
+    
+    res.redirect(url)
+  } catch (error) {
+    next(error)
+  }
+}
+
+export const googleAuthCallbackHandler = async (req:Request,res:Response,next:NextFunction)=>{
+   try {
+     //google sends you a code
+     const code = req.query.code as string | undefined;
+
+     if(!code){
+      // res.redirect(`${process.env.FRONTEND_URL}/login?error=code_missing`);
+      throw new Error("Google authentication failed")
+      return;
+     }
+
+     const client = getGoogleClient();
+     const { tokens } = await client.getToken(code);
+
+     if(!tokens?.id_token){
+        //  res.redirect(`${process.env.FRONTEND_URL}/login?error=id_token_missing`);
+        throw new Error("Google authentication failed")
+         return;
+     }
+     client.setCredentials(tokens);
+   
+     //verify token and read information
+     const ticket = await client.verifyIdToken({
+      idToken:tokens.id_token,
+      audience: process.env.GOOGLE_CLIENT_ID
+     })
+
+     const payload = ticket.getPayload();
+     if (!payload?.email || !payload.email_verified) {
+      throw new Error("Google authentication failed");
+    }
+     
+    const normalisedEmail = payload.email.toLowerCase().trim();
+    let user = await User.findOne({email:normalisedEmail});
+
+    if(!user){
+        const randomPassword = crypto.randomBytes(32).toString('hex');
+        // const passwordHash =  crypto.createHash('sha256').update(randomPassword).digest('hex');
+        const passwordHash =  await hashPassword(randomPassword);
+        ///we use bcrypt here as in register user we are using bcrytp to hash pass word so to maintain consistency and aslo sha256 not secure for password
+
+        //genrate unique username
+        const uniqueUsername =
+  payload.name
+    ?.toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/[^a-z0-9_]/g, "") +
+  "_" +
+  crypto.randomBytes(3).toString("hex");
+
+        user = await User.create({
+          email: normalisedEmail,
+      username: uniqueUsername,
+      password: passwordHash,
+      role: "user",
+      isEmailVerified: true,
+      twoFactoredEnabled: false,
+
+        })
+    }else{
+      if(!user.isEmailVerified){
+        user.isEmailVerified=true;
+      }
+    }
+    
+     const MAX_SESSIONS = 5;
+    if (user.refreshSessions.length >= MAX_SESSIONS) {
+      user.refreshSessions.shift();
+    }
+
+    //create refreshSession
+    user.loginCount+=1;
+     const jti = randomUUID();
+    user.refreshSessions.push({ jti });
+    await user.save();
+     
+
+    //create tokens 
+    const accessToken = createAccessToken(
+      user._id.toString(),
+      user.role,
+      user.tokenVersion
+    );
+
+    const refreshToken = createRefreshToken(
+      user._id.toString(),
+      user.tokenVersion,
+      jti
+    );
+
+    const isProd = process.env.NODE_ENV === "production";
+    //  refresh token is saved to cookie
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      sameSite: "lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      secure: isProd,
+      path: "/",
+    });
+
+    res.cookie("accessToken", accessToken, {
+  httpOnly: true,
+  secure: isProd,
+  sameSite: "lax",
+  path:'/'
+});
+
+res.redirect(`${process.env.FRONTEND_URL}/oauth-success`);
+
+
+
+   } catch (error) {
+    // when frontend ready , we will redirect to frontend err page
+    next(error)
+   }
+}
 //!registerHandler Points
 //!is we use safe parse it doesnot throw error it
 //  ?   The result of a safeParse is what we call a Discriminated Union. It looks like this behind the scenes:

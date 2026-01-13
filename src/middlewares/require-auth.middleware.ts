@@ -1,23 +1,25 @@
 import User from "@/models/user.model.js";
 import { ApiError } from "@/utils/api-error.js";
 import { verifyAccessToken } from "@/utils/tokens.js";
-import { Request,Response,NextFunction } from "express";
+import { Request, Response, NextFunction } from "express";
 
-const requireAuth = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-) => {
+const requireAuth = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const bearer = req.headers.authorization;
+    let token: string | undefined;
 
-    if (!bearer?.startsWith("Bearer ")) {
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith("Bearer ")) {
+      token = authHeader.split(" ")[1];
+    }
+
+    if (!token && req.cookies?.accessToken) {
+      token = req.cookies.accessToken;
+    }
+    if (!token) {
       throw new ApiError(401, "Unauthorized", "fail", {
         errors: ["Access token missing"],
       });
     }
-
-    const token = bearer.split(" ")[1];
 
     let payload;
     try {
@@ -37,8 +39,7 @@ const requireAuth = async (
     if (user.tokenVersion !== payload.tokenVersion) {
       throw new ApiError(401, "Token invalidated", "fail");
     }
-    
-    
+
     req.user = {
       id: user._id.toString(),
       role: user.role,
