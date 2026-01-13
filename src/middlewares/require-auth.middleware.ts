@@ -1,7 +1,7 @@
 import User from "@/models/user.model.js";
 import { ApiError } from "@/utils/api-error.js";
 import { verifyAccessToken } from "@/utils/tokens.js";
-import { NextFunction } from "express";
+import { Request,Response,NextFunction } from "express";
 
 const requireAuth = async (
   req: Request,

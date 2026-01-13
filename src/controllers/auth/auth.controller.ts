@@ -258,7 +258,8 @@ export const loginHandler = async (
       jti,
       userAgent: req.headers["user-agent"],
     });
-
+    
+    user.loginCount+=1;
     await user.save();
     const userID = user._id.toString();
     const tokenVersion = user.tokenVersion;
