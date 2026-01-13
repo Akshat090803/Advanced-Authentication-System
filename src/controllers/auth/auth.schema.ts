@@ -7,7 +7,7 @@ export const registerSchema = z.object({
     .min(1, "Username is required") //this ensure username is required
     .min(4, "Username must be atleast 4 characters")
     .max(20, "Username cannot exceeds 20 characters"),
-  email: z.email("Invalid email format").trim().min(1, "Email is required").toLowerCase(),
+  email: z.string().email("Invalid email format").trim().min(1, "Email is required").toLowerCase(),
   password: z
     .string()
     .min(1, { message: "Password is required" })
@@ -24,7 +24,7 @@ export const registerSchema = z.object({
 
 
 export const loginSchema = z.object({
-  email: z.email("Invalid email format").trim().min(1, "Email is required").toLowerCase(),
+  email: z.string().email("Invalid email format").trim().min(1, "Email is required").toLowerCase(),
   password: z
     .string()
     .min(1, { message: "Password is required" })
@@ -34,5 +34,31 @@ export const loginSchema = z.object({
 
 
 export const emailSchema = z.object({
-    email: z.email("Invalid email format").trim().min(1, "Email is required").toLowerCase()
+    email: z.string().email("Invalid email format").trim().min(1, "Email is required").toLowerCase()
 })
+
+export const forgotPasswordSchema = z.object({
+      email: z.string().email("Invalid email format").trim().min(1, "Email is required").toLowerCase(),
+      method: z.enum(["otp", "token"],"Method must be either 'otp' or 'token'")
+})
+
+
+export const resetPasswordSchema = z.object({
+  token: z.string().optional(),
+  otp: z.string().optional(),
+  password: z
+    .string()
+    .min(1, { message: "Password is required" })
+    .min(8, "Password must be at least 8 characters")
+    .regex(/[A-Z]/, "Password must contain at least one uppercase letter")
+    .regex(/[a-z]/, "Password must contain at least one lowercase letter")
+    .regex(/[0-9]/, "Password must contain at least one number")
+    .regex(/[^A-Za-z0-9]/, "Password must contain at least one special character"),
+})
+.refine(
+    (data) => (data.token && !data.otp) || (!data.token && data.otp),
+    {
+      message: "Provide either token or otp, not both",
+      path: ["token"],
+    }
+  );

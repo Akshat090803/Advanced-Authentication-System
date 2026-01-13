@@ -15,6 +15,7 @@ export interface IUser extends Document {
   twoFactorSecret?: string;
   tokenVersion: number;
   resetPasswordToken?: string;
+  resetPasswordOtp?: string;
   resetPasswordExpires?: Date;
   loginCount: number;
   createdAt: Date;
@@ -53,6 +54,7 @@ const userSchema = new Schema<IUser>(
       trim: true,
       unique: [true, "Email already taken"],
       lowercase: true,
+      index:true
     },
     password: {
       type: String,
@@ -82,6 +84,11 @@ const userSchema = new Schema<IUser>(
       default: 0,
     },
     resetPasswordToken: {
+      type: String,
+      default: undefined,
+      index: true, // Fast lookup during password reset
+    },
+    resetPasswordOtp: {
       type: String,
       default: undefined,
       index: true, // Fast lookup during password reset

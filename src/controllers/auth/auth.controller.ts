@@ -1,6 +1,12 @@
 import { NextFunction, Request, Response } from "express";
-import { emailSchema, loginSchema, registerSchema } from "./auth.schema.js";
-import User from "@/models/user.model.js";
+import {
+  emailSchema,
+  forgotPasswordSchema,
+  loginSchema,
+  registerSchema,
+  resetPasswordSchema,
+} from "./auth.schema.js";
+import User, { IUser } from "@/models/user.model.js";
 import { ApiError } from "@/utils/api-error.js";
 import { comparePassword, hashPassword } from "@/utils/hash-password.js";
 import JWT from "jsonwebtoken";
@@ -12,7 +18,7 @@ import {
   createVerifyToken,
   verifyRefreshToken,
 } from "@/utils/tokens.js";
-import { randomUUID } from "crypto";
+import crypto, { randomUUID } from "crypto";
 
 export const registerHandler = async (
   req: Request,
@@ -269,7 +275,7 @@ export const loginHandler = async (
       sameSite: "none",
       maxAge: 7 * 24 * 60 * 60 * 1000,
       secure: isProd,
-      path:'/'
+      path: "/",
     });
 
     return sendSuccessResponse({
@@ -306,7 +312,7 @@ export const refreshHandler = async (
 
     const payload = verifyRefreshToken(refreshToken);
 
-    if (!payload || !payload?.sub ||!payload?.jti) {
+    if (!payload || !payload?.sub || !payload?.jti) {
       throw new ApiError(401, "Invalid Refresh Token", "fail", {
         errors: ["User details missing in refresh token"],
       });
@@ -334,32 +340,28 @@ export const refreshHandler = async (
         errors: ["User session has expired"],
       });
     }
-    
+
     const newJti = randomUUID();
 
     //remove old session
-     await User.findByIdAndUpdate(payload.sub, {
-  $pull: { refreshSessions: { jti: payload.jti } },
-});
-//add new session
-await User.findByIdAndUpdate(payload.sub, {
-  $push: {
-    refreshSessions: {
-      jti: newJti,
-      userAgent: req.headers["user-agent"],
-    },
-  },
-});
-    
+    await User.findByIdAndUpdate(payload.sub, {
+      $pull: { refreshSessions: { jti: payload.jti } },
+    });
+    //add new session
+    await User.findByIdAndUpdate(payload.sub, {
+      $push: {
+        refreshSessions: {
+          jti: newJti,
+          userAgent: req.headers["user-agent"],
+        },
+      },
+    });
+
     const userID = user._id.toString();
     const tokenVersion = user.tokenVersion;
     const role = user.role;
     const newAccessToken = createAccessToken(userID, role, tokenVersion);
-    const newRefreshToken = createRefreshToken(
-      userID,
-      tokenVersion,
-      newJti
-    );
+    const newRefreshToken = createRefreshToken(userID, tokenVersion, newJti);
 
     const isProd = process.env.NODE_ENV === "production";
     //  refresh token is saved to cookie
@@ -368,7 +370,7 @@ await User.findByIdAndUpdate(payload.sub, {
       sameSite: "none",
       maxAge: 7 * 24 * 60 * 60 * 1000,
       secure: isProd,
-      path:"/"
+      path: "/",
     });
 
     return sendSuccessResponse({
@@ -433,6 +435,152 @@ export const logoutHandler = async (
   }
 };
 
+//forgot password
+export const forgotPasswordHandler = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { email, method } = forgotPasswordSchema.parse(req.body);
+
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return sendSuccessResponse({
+        res,
+        statusCode: 200,
+        message: "If the email exists, reset instructions have been sent.",
+      });
+    }
+
+    user.resetPasswordToken = undefined;
+    user.resetPasswordOtp = undefined;
+
+    const expireAt = new Date(Date.now() + 10 * 60 * 1000); //expires in 10 min
+    user.resetPasswordExpires = expireAt;
+
+    if (method === "token") {
+      const appUrl = process.env.BACKEND_URL!;
+      //create a raw token
+      const rawToken = crypto.randomBytes(32).toString("hex");
+      const hashedToken = crypto
+        .createHash("sha256")
+        .update(rawToken)
+        .digest("hex");
+
+      user.resetPasswordToken = hashedToken;
+
+      const resetUrl = `${appUrl}/reset-password?token=${rawToken}`;
+
+      await sendEmail(
+        user.email,
+        "Reset your password",
+        `
+          <p>Hello ${user.username},</p>
+          <p>Click the link below to reset your password:</p>
+          <a href="${resetUrl}" target="_blank">Reset Password</a>
+          <p>This link expires in 10 minutes.</p>
+        `
+      );
+    }
+
+    if (method === "otp") {
+      // const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const otp = crypto.randomInt(100000, 1000000).toString();
+      const hashedOtp = crypto.createHash("sha256").update(otp).digest("hex");
+
+      user.resetPasswordOtp = hashedOtp;
+
+      await sendEmail(
+        user.email,
+        "Your password reset OTP",
+        `
+          <p>Hello ${user.username},</p>
+          <p>Your OTP for password reset is:</p>
+          <h2>${otp}</h2>
+          <p>This OTP expires in 10 minutes.</p>
+        `
+      );
+    }
+
+    await user.save();
+    return sendSuccessResponse({
+      res,
+      statusCode: 200,
+      message: "If the email exists, reset instructions have been sent.",
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const resetPasswordHandler = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { password, token, otp } = resetPasswordSchema.parse(req.body);
+
+    if (!password || (!token && !otp)) {
+      throw new ApiError(400, "Validation Error", "fail", {
+        errors: ["Password and token or otp are required"],
+      });
+    }
+
+    let user: IUser | null = null;
+
+    //token validation
+    if (token) {
+      const hashedToken = crypto
+        .createHash("sha256")
+        .update(token)
+        .digest("hex");
+
+      user = await User.findOne({
+        resetPasswordToken: hashedToken,
+        resetPasswordExpires: { $gt: Date.now() },
+      }).select("+password");
+    }
+
+    //otp validation
+    else if (otp) {
+      const normalizedOtp = otp.replace(/\s+/g, "");
+      const hashedOtp = crypto.createHash("sha256").update(normalizedOtp).digest("hex");
+
+      user = await User.findOne({
+        resetPasswordOtp: hashedOtp,
+        resetPasswordExpires: { $gt: Date.now() },
+      }).select("+password");
+    }
+
+    if (!user) {
+      throw new ApiError(400, "Invalid or expired reset request", "fail");
+    }
+
+    const newHashedPassword = await hashPassword(password);
+    user.password = newHashedPassword;
+
+    //reset fields
+    user.resetPasswordToken = undefined;
+    user.resetPasswordOtp = undefined;
+    user.resetPasswordExpires = undefined;
+
+    //invalidate all user sessions
+    user.tokenVersion += 1;
+    user.refreshSessions = [];
+    await user.save();
+
+    return sendSuccessResponse({
+      res,
+      statusCode: 200,
+      message: "Password reset successfully. Please login again.",
+    });
+  } catch (error) {
+    next(error);
+  }
+};
 
 //!registerHandler Points
 //!is we use safe parse it doesnot throw error it
@@ -494,3 +642,55 @@ export const logoutHandler = async (
 //! so we create a checkAvaialbility api also
 //!and also what in case if at time of typing username was available but during submission , username taken
 //?so we check in registerHandler also as a final check and at checkAvailability api also for instant check result at ui
+
+//?Crypto vs Bcrypt
+
+//! for hashing Passwords use bcrypt
+//!for resetting passwords use Crypto
+// crypto vs bcrypt — What each is for
+// Use case	crypto (SHA-256)	bcrypt
+// Passwords	❌ Not ideal	✅ BEST
+// Reset tokens	✅ BEST	❌ Overkill
+// OTPs	✅ BEST	❌ Overkill
+// Fast comparison	✅	❌ Slow
+// Built-in salt	❌ (not needed here)	✅
+// CPU cost	Low	High
+// 🧠 Why bcrypt is WRONG for reset tokens / OTPs
+
+// Reset tokens & OTPs are:
+
+// Short-lived (10–15 min)
+
+// One-time use
+
+// Random & high entropy
+
+// bcrypt:
+
+// Is intentionally slow
+
+// Uses random salt
+
+// Requires bcrypt.compare() (costly)
+
+// 👉 This gives NO real security benefit here and:
+
+// Increases CPU load
+
+// Makes brute-force protection worse at scale
+
+// Complicates logic
+
+// ✅ Correct Security Model
+// Passwords
+
+// ✔ bcrypt
+// ✔ High cost
+// ✔ Long-term storage
+
+// Reset tokens / OTPs
+
+// ✔ crypto hashing
+// ✔ Fast comparison
+// ✔ Short-lived
+// ✔ One-time use
