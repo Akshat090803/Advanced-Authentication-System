@@ -12,6 +12,15 @@ export const createAccessToken = (userID:string,role:"user"|"admin",tokenVersion
   return token
 }
 
+export const verifyAccessToken = (token:string)=>{
+  const payload = JWT.verify(token,process.env.JWT_ACCESS_SECRET!) as {
+    sub:string,
+    role:"user" | "admin",
+    tokenVersion:number
+  };
+
+  return payload
+}
 
 
 export const createRefreshToken= (userID:string,tokenVersion:number,jti:string)=>{
