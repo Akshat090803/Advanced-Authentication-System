@@ -33,7 +33,7 @@ const requireAuth = async (req: Request, res: Response, next: NextFunction) => {
 
     const user = await User.findById(payload.sub);
     if (!user) {
-      throw new ApiError(401, "User not found", "fail");
+      throw new ApiError(404, "User not found", "fail");
     }
 
     if (user.tokenVersion !== payload.tokenVersion) {

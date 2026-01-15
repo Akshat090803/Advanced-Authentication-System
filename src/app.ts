@@ -13,7 +13,7 @@ app.use(express.urlencoded({extended:true}));
 app.use(cookieParser());
 
 app.use('/auth',authRoutes)
-app.use('/',userRoutes)
+app.use('/user',userRoutes)
 app.use('/admin',adminRoutes)
 app.use(errorHandler)
 export default app

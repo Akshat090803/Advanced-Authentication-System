@@ -28,7 +28,7 @@ export const loginSchema = z.object({
   password: z
     .string()
     .min(1, { message: "Password is required" })
-    .min(8, "Password must be at least 8 characters")
+    .min(8, "Password must be at least 8 characters"),
     
 })
 
@@ -62,3 +62,14 @@ export const resetPasswordSchema = z.object({
       path: ["token"],
     }
   );
+
+
+  export const verify2faSetupSchema = z.object({
+    twoFactorCode:z.string()
+    .min(1, { message: "Two Factor Code is required" })
+  })
+  export const verify2faLoginSchema = z.object({
+    twoFactorCode:z.string()
+    .min(1,  "Two Factor Code is required" ),
+    userID:z.string().min(1,"User id is required")
+  })

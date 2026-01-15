@@ -5,6 +5,8 @@ import {
   loginSchema,
   registerSchema,
   resetPasswordSchema,
+  verify2faLoginSchema,
+  verify2faSetupSchema,
 } from "./auth.schema.js";
 import User, { IUser } from "@/models/user.model.js";
 import { ApiError } from "@/utils/api-error.js";
@@ -20,19 +22,21 @@ import {
 } from "@/utils/tokens.js";
 import crypto, { randomUUID } from "crypto";
 import { OAuth2Client } from "google-auth-library";
+import { generateSecret, generateURI, verify } from "otplib";
+import speakeasy from "speakeasy";
+import QRCode from "qrcode";
+function getGoogleClient() {
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const clientID = process.env.GOOGLE_CLIENT_ID;
+  const redirectUrl = process.env.GOOGLE_REDIRECT_URI;
 
-function getGoogleClient(){
-  const clientSecret=process.env.GOOGLE_CLIENT_SECRET;
-  const clientID=process.env.GOOGLE_CLIENT_ID;
-  const redirectUrl=process.env.GOOGLE_REDIRECT_URI;
-
-  if(!clientSecret || !clientID){
-    throw new ApiError(500,"Internal Server Error","error",{
-       errors:["Client Secret or ID is missing"]
-    })
+  if (!clientSecret || !clientID) {
+    throw new ApiError(500, "Internal Server Error", "error", {
+      errors: ["Client Secret or ID is missing"],
+    });
   }
-  
-  return new OAuth2Client(clientID,clientSecret,redirectUrl)
+
+  return new OAuth2Client(clientID, clientSecret, redirectUrl);
 }
 
 export const registerHandler = async (
@@ -42,7 +46,6 @@ export const registerHandler = async (
 ) => {
   try {
     const appUrl = process.env.BACKEND_URL!;
-    console.log("appUrl", appUrl);
     //!with using .parse
     const result = registerSchema.parse(req.body);
     const { username, email, password } = result;
@@ -263,6 +266,34 @@ export const loginHandler = async (
       });
     }
 
+    //!if 2fa enabled
+    if (user.twoFactoredEnabled) {
+      if (!user.twoFactorSecret) {
+        throw new ApiError(
+          400,
+          "Two Factor Authentication Misconfigured",
+          "fail",
+          {
+            errors: [
+              "Two Factor Authentication is Misconfigured for this account.",
+            ],
+          }
+        );
+      }
+      //return response that user has 2fa so he will have to verify otp froma authtenicator.
+      //we send user id in response also as how will clientside know user id as he is not login yet and clinet has no info about user
+      //after this response client will hit verify2FaLoginHandler
+      return sendSuccessResponse({
+        res,
+        statusCode: 200,
+        message: "2FA required",
+        data: {
+          twoFactorRequired: true,
+          tempUserId: user._id, // short-lived identifier
+        },
+      });
+    }
+
     const MAX_SESSIONS = 5;
     if (user.refreshSessions.length >= MAX_SESSIONS) {
       user.refreshSessions.shift();
@@ -273,8 +304,8 @@ export const loginHandler = async (
       jti,
       userAgent: req.headers["user-agent"],
     });
-    
-    user.loginCount+=1;
+
+    user.loginCount += 1;
     await user.save();
     const userID = user._id.toString();
     const tokenVersion = user.tokenVersion;
@@ -563,7 +594,10 @@ export const resetPasswordHandler = async (
     //otp validation
     else if (otp) {
       const normalizedOtp = otp.replace(/\s+/g, "");
-      const hashedOtp = crypto.createHash("sha256").update(normalizedOtp).digest("hex");
+      const hashedOtp = crypto
+        .createHash("sha256")
+        .update(normalizedOtp)
+        .digest("hex");
 
       user = await User.findOne({
         resetPasswordOtp: hashedOtp,
@@ -598,105 +632,110 @@ export const resetPasswordHandler = async (
   }
 };
 
-
 // STEP 1: Redirect to Google Auth Page
 //genrate googleRedirect uri
-//flow frontend->backend->google 
+//flow frontend->backend->google
 //than google->backend->frontend
-export const googleAuthRedirectHandler=async(_req:Request,res:Response,next:NextFunction)=>{
+export const googleAuthRedirectHandler = async (
+  _req: Request,
+  res: Response,
+  next: NextFunction
+) => {
   try {
     const client = getGoogleClient();
 
     const url = client.generateAuthUrl({
-      access_type:"offline",
-      prompt:'consent',
-      scope:['openid','email','profile']
-    })
-    
-    res.redirect(url)
+      access_type: "offline",
+      prompt: "consent",
+      scope: ["openid", "email", "profile"],
+    });
+
+    res.redirect(url);
   } catch (error) {
-    next(error)
+    next(error);
   }
-}
+};
 
-export const googleAuthCallbackHandler = async (req:Request,res:Response,next:NextFunction)=>{
-   try {
-     //google sends you a code
-     const code = req.query.code as string | undefined;
+export const googleAuthCallbackHandler = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    //google sends you a code
+    const code = req.query.code as string | undefined;
 
-     if(!code){
+    if (!code) {
       // res.redirect(`${process.env.FRONTEND_URL}/login?error=code_missing`);
-      throw new Error("Google authentication failed")
+      throw new Error("Google authentication failed");
       return;
-     }
+    }
 
-     const client = getGoogleClient();
-     const { tokens } = await client.getToken(code);
+    const client = getGoogleClient();
+    const { tokens } = await client.getToken(code);
 
-     if(!tokens?.id_token){
-        //  res.redirect(`${process.env.FRONTEND_URL}/login?error=id_token_missing`);
-        throw new Error("Google authentication failed")
-         return;
-     }
-     client.setCredentials(tokens);
-   
-     //verify token and read information
-     const ticket = await client.verifyIdToken({
-      idToken:tokens.id_token,
-      audience: process.env.GOOGLE_CLIENT_ID
-     })
+    if (!tokens?.id_token) {
+      //  res.redirect(`${process.env.FRONTEND_URL}/login?error=id_token_missing`);
+      throw new Error("Google authentication failed");
+      return;
+    }
+    client.setCredentials(tokens);
 
-     const payload = ticket.getPayload();
-     if (!payload?.email || !payload.email_verified) {
+    //verify token and read information
+    const ticket = await client.verifyIdToken({
+      idToken: tokens.id_token,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+
+    const payload = ticket.getPayload();
+    if (!payload?.email || !payload.email_verified) {
       throw new Error("Google authentication failed");
     }
-     
+
     const normalisedEmail = payload.email.toLowerCase().trim();
-    let user = await User.findOne({email:normalisedEmail});
+    let user = await User.findOne({ email: normalisedEmail });
 
-    if(!user){
-        const randomPassword = crypto.randomBytes(32).toString('hex');
-        // const passwordHash =  crypto.createHash('sha256').update(randomPassword).digest('hex');
-        const passwordHash =  await hashPassword(randomPassword);
-        ///we use bcrypt here as in register user we are using bcrytp to hash pass word so to maintain consistency and aslo sha256 not secure for password
+    if (!user) {
+      const randomPassword = crypto.randomBytes(32).toString("hex");
+      // const passwordHash =  crypto.createHash('sha256').update(randomPassword).digest('hex');
+      const passwordHash = await hashPassword(randomPassword);
+      ///we use bcrypt here as in register user we are using bcrytp to hash pass word so to maintain consistency and aslo sha256 not secure for password
 
-        //genrate unique username
-        const uniqueUsername =
-  payload.name
-    ?.toLowerCase()
-    .replace(/\s+/g, "_")
-    .replace(/[^a-z0-9_]/g, "") +
-  "_" +
-  crypto.randomBytes(3).toString("hex");
+      //genrate unique username
+      const uniqueUsername =
+        payload.name
+          ?.toLowerCase()
+          .replace(/\s+/g, "_")
+          .replace(/[^a-z0-9_]/g, "") +
+        "_" +
+        crypto.randomBytes(3).toString("hex");
 
-        user = await User.create({
-          email: normalisedEmail,
-      username: uniqueUsername,
-      password: passwordHash,
-      role: "user",
-      isEmailVerified: true,
-      twoFactoredEnabled: false,
-
-        })
-    }else{
-      if(!user.isEmailVerified){
-        user.isEmailVerified=true;
+      user = await User.create({
+        email: normalisedEmail,
+        username: uniqueUsername,
+        password: passwordHash,
+        role: "user",
+        isEmailVerified: true,
+        twoFactoredEnabled: false,
+      });
+    } else {
+      if (!user.isEmailVerified) {
+        user.isEmailVerified = true;
       }
     }
-    
-     const MAX_SESSIONS = 5;
+
+    const MAX_SESSIONS = 5;
     if (user.refreshSessions.length >= MAX_SESSIONS) {
       user.refreshSessions.shift();
     }
 
     //create refreshSession
-    user.loginCount+=1;
-     const jti = randomUUID();
+    user.loginCount += 1;
+    const jti = randomUUID();
     user.refreshSessions.push({ jti });
     await user.save();
-     
 
-    //create tokens 
+    //create tokens
     const accessToken = createAccessToken(
       user._id.toString(),
       user.role,
@@ -720,21 +759,195 @@ export const googleAuthCallbackHandler = async (req:Request,res:Response,next:Ne
     });
 
     res.cookie("accessToken", accessToken, {
-  httpOnly: true,
-  secure: isProd,
-  sameSite: "lax",
-  path:'/'
-});
+      httpOnly: true,
+      secure: isProd,
+      sameSite: "lax",
+      path: "/",
+    });
 
-res.redirect(`${process.env.FRONTEND_URL}/oauth-success`);
-
-
-
-   } catch (error) {
+    res.redirect(`${process.env.FRONTEND_URL}/oauth-success`);
+  } catch (error) {
     // when frontend ready , we will redirect to frontend err page
-    next(error)
-   }
-}
+    next(error);
+  }
+};
+
+//will setup 2fa for user , send qr code
+export const setup2FaHandler = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      throw new ApiError(401, "Not Authenticated", "fail");
+    }
+
+    const user = await User.findById(userId).select("+twoFactorSecret");
+
+    if (!user) throw new ApiError(404, "User not found", "fail");
+
+    //!using otplib
+    // const secret = generateSecret();
+    // const uri = generateURI({
+    //   issuer: "Advance Authentication",
+    //   label: user.email,
+    //   secret,
+    // });
+
+    //! using speakeasy
+    const secret = speakeasy.generateSecret({
+      length: 20,
+      name: `${user.email.split("@")[1]}`,
+      issuer: "Advance Authentication App",
+    });
+
+    user.twoFactorSecret = secret.base32;
+    await user.save();
+    const uri = await QRCode.toDataURL(secret.otpauth_url!);
+    return sendSuccessResponse({
+      res,
+      statusCode: 200,
+      message: "Scan QR code with authenticator app",
+      data: {
+        qrCode: uri,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+//verify the setup by confirming the code
+export const verify2FaSetupHandler = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      throw new ApiError(401, "Not Authenticated", "fail");
+    }
+
+    const { twoFactorCode } = verify2faSetupSchema.parse(req.body);
+
+    const user = await User.findById(userId).select("+twoFactorSecret");
+
+    if (!user) throw new ApiError(404, "User not found", "fail");
+
+    if (!user.twoFactorSecret) {
+      throw new ApiError(400, "You haven't set up your 2fa yet", "fail", {
+        errors: ["User's 2fa secret is not present in db"],
+      });
+    }
+
+    //!otpLib
+    //  const isValid = await verify({secret:user.twoFactorSecret, token:twoFactorCode });
+
+    //!  speakeasy
+    const isValid = speakeasy.totp.verify({
+      secret: user.twoFactorSecret!,
+      encoding: "base32",
+      token: twoFactorCode,
+      window: 1,
+    });
+    if (!isValid) {
+      throw new ApiError(401, "Invalid OTP", "fail");
+    }
+
+    //2fa verified and successfully enabled
+    user.twoFactoredEnabled = true;
+    await user.save();
+
+    return sendSuccessResponse({
+      res,
+      statusCode: 200,
+      message: "Two-factor authentication enabled",
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const verify2FaLoginHandler = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { userID, twoFactorCode } = verify2faLoginSchema.parse(req.body);
+
+    const user = await User.findById(userID).select("+twoFactorSecret");
+
+    if (!user || !user.twoFactoredEnabled) {
+      throw new ApiError(400, "Invalid request", "fail");
+    }
+
+    //verify code
+    const isValid= speakeasy.totp.verify({
+    secret: user.twoFactorSecret!,
+    encoding: "base32",
+    token: twoFactorCode,
+    window: 1,
+  });
+
+    if (!isValid) {
+    throw new ApiError(401, "Invalid Code", "fail");
+  }
+
+  //same step of loginHandler
+  const MAX_SESSIONS = 5;
+    if (user.refreshSessions.length >= MAX_SESSIONS) {
+      user.refreshSessions.shift();
+    }
+
+    const jti = randomUUID();
+    user.refreshSessions.push({
+      jti,
+      userAgent: req.headers["user-agent"],
+    });
+
+    user.loginCount += 1;
+    await user.save();
+    const tokenVersion = user.tokenVersion;
+    const role = user.role;
+
+    const accessToken = createAccessToken(userID, role, tokenVersion);
+
+    const refreshToken = createRefreshToken(userID, tokenVersion, jti);
+
+    const isProd = process.env.NODE_ENV === "production";
+    //  refresh token is saved to cookie
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      sameSite: "none",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      secure: isProd,
+      path: "/",
+    });
+
+    return sendSuccessResponse({
+      res,
+      statusCode: 200,
+      message: "Login done successfully",
+      data: {
+        accessToken,
+        id: userID,
+        role,
+        userName: user.username,
+        email: user.email,
+        isEmailVerified: user.isEmailVerified,
+        twoFactorEnabled: user.twoFactoredEnabled,
+      },
+    });
+
+
+  } catch (error) {
+    next(error);
+  }
+};
+
 //!registerHandler Points
 //!is we use safe parse it doesnot throw error it
 //  ?   The result of a safeParse is what we call a Discriminated Union. It looks like this behind the scenes:
@@ -847,3 +1060,5 @@ res.redirect(`${process.env.FRONTEND_URL}/oauth-success`);
 // ✔ Fast comparison
 // ✔ Short-lived
 // ✔ One-time use
+
+//! For 2fa codev we can use either speakeasy npm or otplib
